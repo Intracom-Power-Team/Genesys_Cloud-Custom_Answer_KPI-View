@@ -242,8 +242,8 @@ var SlaCore = (function () {
           var start = d.interval.split('/')[0];
           var v = {
             offered: count(d.metrics, 'nOffered'), answered: count(d.metrics, 'tAnswered'),
-            answeredWithinT1: count(d.metrics, 'ansWithinT1'), answeredT1toT2: count(d.metrics, 'ansT1toT2'),
-            answeredOverT2: count(d.metrics, 'ansOverT2'), overSla: count(d.metrics, 'nOverSla')
+            answeredWithinT1: viewCount(d, 'ansWithinT1'), answeredT1toT2: viewCount(d, 'ansT1toT2'),
+            answeredOverT2: viewCount(d, 'ansOverT2'), overSla: count(d.metrics, 'nOverSla')
           };
           addInto(byInt[start] || (byInt[start] = blank()), v);
           addInto(byQ[qid] || (byQ[qid] = blank()), v);
@@ -265,12 +265,19 @@ var SlaCore = (function () {
     var m = (metrics || []).filter(function (x) { return x.metric === name; })[0];
     return m && m.stats && typeof m.stats.count === 'number' ? m.stats.count : 0;
   }
+  // View results come back in data[].views[] as { name, stats } (StatisticalResponse.views / AggregateViewData),
+  // not in data[].metrics[]. Fall back to metrics[] only for robustness.
+  function viewCount(d, name) {
+    var v = (d.views || []).filter(function (x) { return x.name === name; })[0];
+    if (v && v.stats && typeof v.stats.count === 'number') return v.stats.count;
+    return count(d.metrics, name);
+  }
   function shape(api, tz, gran) {
     var data = (api && api.results && api.results[0] && api.results[0].data) || [];
     var rows = data.map(function (d) {
       var start = d.interval.split('/')[0];
       var answered = count(d.metrics, 'tAnswered');
-      var w = count(d.metrics, 'ansWithinT1'), m = count(d.metrics, 'ansT1toT2'), o = count(d.metrics, 'ansOverT2');
+      var w = viewCount(d, 'ansWithinT1'), m = viewCount(d, 'ansT1toT2'), o = viewCount(d, 'ansOverT2');
       var ld = localDate(start, tz);
       return {
         intervalStart: start,
@@ -635,6 +642,13 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
       out.innerHTML = html + '<div class="msg">Δεν υπάρχουν κλήσεις για ' +
         ({ day: 'αυτή την ημέρα', week: 'αυτή την εβδομάδα', month: 'αυτόν τον μήνα' })[view.period] + '.</div>';
       return;
+    }
+    // consistency check: the three buckets must add up to Answered
+    var bsum = t.answeredWithinT1 + t.answeredT1toT2 + t.answeredOverT2;
+    if (t.answered > 0 && bsum !== t.answered) {
+      html += '<div class="msg err" style="margin-bottom:10px">Έλεγχος συνέπειας: buckets ' + t.answeredWithinT1 + ' + ' +
+        t.answeredT1toT2 + ' + ' + t.answeredOverT2 + ' = ' + bsum + ' ≠ Answered ' + t.answered +
+        (bsum === 0 ? ' — το API δεν επέστρεψε αποτελέσματα για τα views.' : '.') + '</div>';
     }
     if (group) html += '<h2>Σύνολο ομάδας ανά ' + (view.period === 'day' ? 'διάστημα' : 'ημέρα') + '</h2>';
     html += '<div class="scroll"><table>' + head(view.period === 'day' ? 'Interval' : 'Ημέρα', t1, t2) + '<tbody>';
