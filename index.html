@@ -7,11 +7,11 @@
 <!--
   Genesys Cloud dashboard "Web content" page — direct Analytics API, no data action.
   POST /api/v2/analytics/conversations/aggregates/query with views (rangeBound on tAnswered),
-  using the signed-in user's token (OAuth Token Implicit Grant).
+  using the signed-in user's token (OAuth Code Authorization + PKCE, no client secret).
 
   URL parameters:
     env       Genesys environment, e.g. mypurecloud.de                (required)
-    clientId  OAuth client ID, grant type "Token Implicit Grant"      (required)
+    clientId  OAuth client ID, grant type "Code Authorization" (PKCE) (required)
     queueId   Queue ID                                                (required)
     queueName Label to show                                           (optional)
     t1, t2    Thresholds in seconds, default 30 / 60                  (optional)
@@ -158,29 +158,79 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
 </script>
 
 <script>
-(function () {
-  var STORE = 'slaBuckets.token';
-  function sGet() { try { return JSON.parse(sessionStorage.getItem(STORE) || 'null'); } catch (e) { return null; } }
-  function sSet(v) { try { sessionStorage.setItem(STORE, JSON.stringify(v)); } catch (e) {} }
-  function sDel() { try { sessionStorage.removeItem(STORE); } catch (e) {} }
+(async function () {
+  // ===================== OAuth: Code Authorization + PKCE (no client secret) =====================
+  // Mirrors the official Genesys Cloud JS SDK (loginPKCEGrant / authorizePKCEGrant):
+  //   authorize: response_type=code, client_id, redirect_uri, code_challenge (S256), state
+  //   token:     POST https://login.{env}/oauth/token  (form)  grant_type=authorization_code,
+  //              code, code_verifier, client_id, redirect_uri
+  // redirect_uri is always the clean page URL; the page's own URL parameters travel in "state".
+  // Inside an iframe (dashboard widget) login runs in a popup, which hands the token back via postMessage.
+  var TOKEN_KEY = 'slaBuckets.token', VERIFIER_KEY = 'slaBuckets.pkce';
+  var MSG_TYPE = 'slaBuckets.token';
+  var pageUrl = location.origin + location.pathname;
+  var inIframe = (function () { try { return window.self !== window.top; } catch (e) { return true; } })();
 
-  // ---- OAuth return: token arrives in the hash, our URL parameters come back in "state" ----
-  var token = null, oauthError = null;
-  if (location.hash.indexOf('access_token=') >= 0 || location.hash.indexOf('error=') >= 0) {
-    var h = new URLSearchParams(location.hash.slice(1));
-    if (h.get('access_token')) {
-      token = h.get('access_token');
-      sSet({ t: token, exp: Date.now() + (parseInt(h.get('expires_in') || '0', 10) - 60) * 1000 });
-    } else {
-      oauthError = (h.get('error') || 'error') + (h.get('error_description') ? ': ' + h.get('error_description') : '');
-    }
-    var st = h.get('state') || '';
-    history.replaceState(null, '', location.pathname + (st.charAt(0) === '?' ? st : location.search));
-  } else {
-    var saved = sGet();
-    if (saved && saved.exp > Date.now()) token = saved.t;
+  function sGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+  function sSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
+  function sDel(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
+
+  function b64url(bytes) {
+    var s = ''; bytes = new Uint8Array(bytes);
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  async function pkcePair() {
+    var verifier = b64url(crypto.getRandomValues(new Uint8Array(64)));           // 86 chars (allowed 43–128)
+    var challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+    return { verifier: verifier, challenge: challenge };
   }
 
+  var out = document.getElementById('out');
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function show(html, cls) { out.innerHTML = '<div class="msg ' + (cls || '') + '">' + html + '</div>'; }
+
+  // ---- 1. Returning from the login page? (?code=…&state=…  or  ?error=…&state=…) ----
+  var token = null, tokenExp = 0, oauthError = null;
+  var ret = new URLSearchParams(location.search);
+  if (ret.has('code') || ret.has('error')) {
+    var origSearch = ret.get('state') || '';
+    if (origSearch.charAt(0) !== '?') origSearch = '';
+    var o = new URLSearchParams(origSearch);
+    history.replaceState(null, '', location.pathname + origSearch);   // remove code from the address bar
+    if (ret.has('error')) {
+      oauthError = ret.get('error') + (ret.get('error_description') ? ': ' + ret.get('error_description') : '');
+    } else {
+      try {
+        var verifier = sGet(VERIFIER_KEY);
+        if (!verifier) throw new Error('Λείπει το PKCE code verifier (ο browser δεν κράτησε το session storage). Δοκιμάστε ξανά.');
+        var tr = await fetch('https://login.' + o.get('env') + '/oauth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'authorization_code', code: ret.get('code'),
+                                      code_verifier: verifier, client_id: o.get('clientId'), redirect_uri: pageUrl }).toString()
+        });
+        var tj = await tr.json().catch(function () { return {}; });
+        if (!tr.ok || !tj.access_token) throw new Error('token ' + tr.status + ': ' + (tj.error_description || tj.error || JSON.stringify(tj)));
+        token = tj.access_token;
+        tokenExp = Date.now() + (parseInt(tj.expires_in || '0', 10) - 60) * 1000;
+      } catch (e) { oauthError = e.message; }
+      sDel(VERIFIER_KEY);
+    }
+    // Popup window: hand the result to the dashboard iframe and close
+    if (o.get('popup') === '1' && window.opener) {
+      window.opener.postMessage({ type: MSG_TYPE, token: token, exp: tokenExp, error: oauthError }, location.origin);
+      document.body.innerHTML = '<p style="font:14px system-ui;padding:16px">' +
+        (oauthError ? 'Login απέτυχε: ' + esc(oauthError) : 'Επιτυχής σύνδεση. Το παράθυρο κλείνει…') + '</p>';
+      if (!oauthError) setTimeout(function () { window.close(); }, 300);
+      return;
+    }
+    if (token) sSet(TOKEN_KEY, JSON.stringify({ t: token, exp: tokenExp }));
+  } else {
+    try { var saved = JSON.parse(sGet(TOKEN_KEY) || 'null'); if (saved && saved.exp > Date.now()) { token = saved.t; tokenExp = saved.exp; } } catch (e) {}
+  }
+
+  // ---- 2. Page configuration (from the URL, restored after login) ----
   var qs = new URLSearchParams(location.search);
   var cfg = {
     env: qs.get('env'), clientId: qs.get('clientId'), queueId: qs.get('queueId'),
@@ -188,44 +238,68 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     t1: parseInt(qs.get('t1') || '30', 10), t2: parseInt(qs.get('t2') || '60', 10),
     gran: qs.get('gran') === 'PT30M' ? 'PT30M' : 'PT1H',
     tz: qs.get('tz') || 'Europe/Athens', media: qs.get('media') || 'voice',
-    refresh: parseInt(qs.get('refresh') || '300', 10)
+    refresh: parseInt(qs.get('refresh') || '300', 10),
+    popup: qs.get('popup') === '1'
   };
-  var out = document.getElementById('out');
-  var dateEl = document.getElementById('date');
-
-  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  function show(html, cls) { out.innerHTML = '<div class="msg ' + (cls || '') + '">' + html + '</div>'; }
-
   var missing = ['env', 'clientId', 'queueId'].filter(function (k) { return !cfg[k]; });
   if (missing.length) { show('Λείπουν παράμετροι URL: ' + missing.join(', '), 'err'); return; }
-  if (!(cfg.t1 > 0 && cfg.t2 > cfg.t1)) { show('Το t2 πρέπει να είναι μεγαλύτερο από το t1.', 'err'); return; }
   if (!/^[a-z0-9.-]+$/i.test(cfg.env)) { show('Μη έγκυρο env.', 'err'); return; }
+  if (!(cfg.t1 > 0 && cfg.t2 > cfg.t1)) { show('Το t2 πρέπει να είναι μεγαλύτερο από το t1.', 'err'); return; }
 
+  async function startLogin(searchForState) {
+    var p = await pkcePair();
+    sSet(VERIFIER_KEY, p.verifier);
+    location.replace('https://login.' + cfg.env + '/oauth/authorize?' + new URLSearchParams({
+      response_type: 'code', client_id: cfg.clientId, redirect_uri: pageUrl,
+      code_challenge: p.challenge, code_challenge_method: 'S256', state: searchForState
+    }).toString());
+  }
+
+  // Popup window opened by the iframe: go straight to the login page
+  if (cfg.popup) { await startLogin(location.search); return; }
+
+  if (oauthError) {
+    show('Login απέτυχε: ' + esc(oauthError) +
+      '<br>Ελέγξτε ότι το OAuth client είναι <b>Code Authorization</b> και ότι το Authorized redirect URI είναι ακριβώς: <b>' +
+      esc(pageUrl) + '</b><br><button type="button" id="retry">Δοκιμή ξανά</button>', 'err');
+    document.getElementById('retry').addEventListener('click', function () { loginInteractive(); });
+    return;
+  }
+
+  // In an iframe → popup (needs a click, so popup blockers allow it). Top-level → normal redirect.
+  function loginInteractive() {
+    if (!inIframe) { startLogin(location.search); return; }
+    var sep = location.search ? '&' : '?';
+    var w = window.open(pageUrl + location.search + sep + 'popup=1', 'slaBucketsLogin', 'width=520,height=680');
+    if (!w) show('Ο browser μπλόκαρε το popup. Επιτρέψτε popups για αυτή τη σελίδα και πατήστε ξανά Σύνδεση.', 'err');
+  }
+  var started = false;
+  window.addEventListener('message', function (ev) {
+    if (ev.origin !== location.origin || !ev.data || ev.data.type !== MSG_TYPE) return;
+    if (ev.data.error) { show('Login απέτυχε: ' + esc(ev.data.error), 'err'); return; }
+    token = ev.data.token; tokenExp = ev.data.exp;
+    sSet(TOKEN_KEY, JSON.stringify({ t: token, exp: tokenExp }));
+    if (!started) start(); else load();
+  });
+  function needLogin(reason) {
+    token = null; sDel(TOKEN_KEY);
+    if (!inIframe) { startLogin(location.search); return; }
+    show((reason ? esc(reason) + '<br>' : '') + '<button type="button" id="loginBtn">Σύνδεση στο Genesys Cloud</button>');
+    document.getElementById('loginBtn').addEventListener('click', loginInteractive);
+  }
+
+  // ===================== Data + rendering =====================
+  var dateEl = document.getElementById('date');
   dateEl.value = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.tz }).format(new Date());
   document.getElementById('title').textContent = 'Answer time buckets' + (cfg.queueName ? ' · ' + cfg.queueName : '');
   document.getElementById('meta').textContent = '≤' + cfg.t1 + 's / ' + (cfg.t1 + 1) + '–' + cfg.t2 + 's / >' + cfg.t2 +
     's · ' + (cfg.gran === 'PT30M' ? '30 λεπτά' : 'ανά ώρα') + ' · ' + cfg.media;
 
-  // ---- login (Implicit Grant) ----
-  // redirect_uri is always the clean page URL (register exactly this in the OAuth client);
-  // the URL parameters travel in "state" and are restored on return.
-  function loginUrl() {
-    return 'https://login.' + cfg.env + '/oauth/authorize?response_type=token' +
-      '&client_id=' + encodeURIComponent(cfg.clientId) +
-      '&redirect_uri=' + encodeURIComponent(location.origin + location.pathname) +
-      '&state=' + encodeURIComponent(location.search);
-  }
-  if (oauthError) {
-    show('Login απέτυχε: ' + esc(oauthError) + '<br>Ελέγξτε ότι το Authorized redirect URI του OAuth client είναι ακριβώς: <b>' +
-      esc(location.origin + location.pathname) + '</b> — <a href="' + esc(loginUrl()) + '">Δοκιμή ξανά</a>', 'err');
-    return;
-  }
-  if (!token) { location.href = loginUrl(); return; }
-
-  // ---- data ----
   var busy = false;
   function load() {
-    if (busy) return; busy = true;
+    if (busy || !token) return;
+    if (tokenExp && Date.now() > tokenExp) { needLogin('Η σύνδεση έληξε.'); return; }
+    busy = true;
     var body = SlaCore.buildQuery({ date: dateEl.value, tz: cfg.tz, gran: cfg.gran, queueId: cfg.queueId,
                                     media: cfg.media, t1: cfg.t1, t2: cfg.t2 });
     fetch('https://api.' + cfg.env + '/api/v2/analytics/conversations/aggregates/query', {
@@ -233,7 +307,7 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify(body)
     }).then(function (res) {
-      if (res.status === 401) { sDel(); location.href = loginUrl(); return null; }
+      if (res.status === 401) { needLogin('Η σύνδεση έληξε.'); return null; }
       return res.json().catch(function () { return {}; }).then(function (j) {
         if (res.status === 403) throw new Error('403 — λείπει το permission Analytics > Conversation Aggregate > View ή πρόσβαση στο division της ουράς.');
         if (res.status === 429) throw new Error('429 — rate limit. Αυξήστε το refresh.');
@@ -278,10 +352,15 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     out.innerHTML = html;
   }
 
-  document.getElementById('reload').addEventListener('click', load);
-  dateEl.addEventListener('change', load);
-  load();
-  if (cfg.refresh > 0) setInterval(load, Math.max(60, cfg.refresh) * 1000);
+  function start() {
+    started = true;
+    document.getElementById('reload').addEventListener('click', load);
+    dateEl.addEventListener('change', load);
+    load();
+    if (cfg.refresh > 0) setInterval(load, Math.max(60, cfg.refresh) * 1000);
+  }
+
+  if (token) start(); else needLogin();
 })();
 </script>
 </body>
