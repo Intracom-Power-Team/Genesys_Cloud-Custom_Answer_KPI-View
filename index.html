@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Answer Time Buckets</title>
+<!--
+  Genesys Cloud dashboard "Web content" page — direct Analytics API, no data action.
+  POST /api/v2/analytics/conversations/aggregates/query with views (rangeBound on tAnswered),
+  using the signed-in user's token (OAuth Token Implicit Grant).
+
+  URL parameters:
+    env       Genesys environment, e.g. mypurecloud.de                (required)
+    clientId  OAuth client ID, grant type "Token Implicit Grant"      (required)
+    queueId   Queue ID                                                (required)
+    queueName Label to show                                           (optional)
+    t1, t2    Thresholds in seconds, default 30 / 60                  (optional)
+    gran      PT1H (default) or PT30M                                 (optional)
+    tz        IANA time zone, default Europe/Athens                   (optional)
+    media     voice (default), message, email, callback               (optional)
+    refresh   Auto refresh seconds, default 300, 0 = off, min 60      (optional)
+
+  Viewer permission needed: Analytics > Conversation Aggregate > View (+ access to the queue's division).
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2430; --muted: #6b7280; --line: #e5e7eb;
+    --ok: #2e7d5b; --warn: #c58a14; --bad: #c2413b; --card: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16181d; --fg: #e8eaee; --muted: #9aa1ad; --line: #2b2f37;
+            --ok: #4fb38a; --warn: #e0a83a; --bad: #e0675f; --card: #1e2128; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg);
+         font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 10px; }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .kpi { background: var(--card); border-radius: 8px; padding: 8px 10px; }
+  .kpi .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--muted); font-size: 11px; }
+  .kpi .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  th:first-child, td:first-child { text-align: left; }
+  td.bar { width: 40%; min-width: 120px; }
+  .stack { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: var(--line); }
+  .stack span { display: block; height: 100%; }
+  .ok { background: var(--ok); } .warn { background: var(--warn); } .bad { background: var(--bad); }
+  .msg { padding: 16px; background: var(--card); border-radius: 8px; color: var(--muted); }
+  .msg.err { color: var(--bad); }
+  .msg a { color: inherit; }
+  button, input { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line);
+                  background: var(--card); color: var(--fg); }
+  button { cursor: pointer; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Answer time buckets</h1>
+  <span class="meta" id="meta"></span>
+  <span style="flex:1"></span>
+  <input type="date" id="date" aria-label="Ημερομηνία">
+  <button id="reload" type="button">Ανανέωση</button>
+</header>
+<div id="out"><div class="msg">Φόρτωση…</div></div>
+
+<!-- Pure logic (no DOM). Kept separate so it can be unit-tested in Node. -->
+<script id="core">
+var SlaCore = (function () {
+  function tzOffsetMinutes(timeZone, utcMs) {
+    var dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    var p = {};
+    dtf.formatToParts(new Date(utcMs)).forEach(function (x) { p[x.type] = x.value; });
+    var asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+    return Math.round((asUtc - utcMs) / 60000);
+  }
+  // UTC instant of local midnight (DST-safe, two passes)
+  function localMidnightUtc(dateStr, timeZone) {
+    var a = dateStr.split('-').map(Number);
+    var guess = Date.UTC(a[0], a[1] - 1, a[2]);
+    var utc = guess - tzOffsetMinutes(timeZone, guess) * 60000;
+    return guess - tzOffsetMinutes(timeZone, utc) * 60000;
+  }
+  function addDays(dateStr, n) {
+    var a = dateStr.split('-').map(Number);
+    return new Date(Date.UTC(a[0], a[1] - 1, a[2] + n)).toISOString().slice(0, 10);
+  }
+  function dayInterval(dateStr, timeZone) {
+    return new Date(localMidnightUtc(dateStr, timeZone)).toISOString() + '/' +
+           new Date(localMidnightUtc(addDays(dateStr, 1), timeZone)).toISOString();
+  }
+  function localHHmm(isoUtc, timeZone) {
+    return new Intl.DateTimeFormat('en-GB', { timeZone: timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .format(new Date(isoUtc));
+  }
+  // SL counts wait <= target as met, so "<= T1" is tAnswered < T1ms + 1
+  function buildQuery(o) {
+    var t1 = o.t1 * 1000, t2 = o.t2 * 1000;
+    return {
+      interval: dayInterval(o.date, o.tz),
+      granularity: o.gran,
+      timeZone: o.tz,
+      groupBy: ['queueId'],
+      filter: { type: 'and', predicates: [
+        { type: 'dimension', dimension: 'queueId', operator: 'matches', value: o.queueId },
+        { type: 'dimension', dimension: 'mediaType', operator: 'matches', value: o.media }
+      ]},
+      metrics: ['nOffered', 'tAnswered', 'nOverSla'],
+      views: [
+        { target: 'tAnswered', name: 'ansWithinT1', function: 'rangeBound', range: { lt: t1 + 1 } },
+        { target: 'tAnswered', name: 'ansT1toT2',  function: 'rangeBound', range: { gte: t1 + 1, lt: t2 + 1 } },
+        { target: 'tAnswered', name: 'ansOverT2',  function: 'rangeBound', range: { gte: t2 + 1 } }
+      ]
+    };
+  }
+  function pct(part, whole) { return whole > 0 ? Math.round(part / whole * 1000) / 10 : 0; }
+  function count(metrics, name) {
+    var m = (metrics || []).filter(function (x) { return x.metric === name; })[0];
+    return m && m.stats && typeof m.stats.count === 'number' ? m.stats.count : 0;
+  }
+  function shape(api, tz) {
+    var data = (api && api.results && api.results[0] && api.results[0].data) || [];
+    var rows = data.map(function (d) {
+      var start = d.interval.split('/')[0];
+      var answered = count(d.metrics, 'tAnswered');
+      var w = count(d.metrics, 'ansWithinT1'), m = count(d.metrics, 'ansT1toT2'), o = count(d.metrics, 'ansOverT2');
+      return {
+        intervalStart: start, intervalLabel: localHHmm(start, tz),
+        offered: count(d.metrics, 'nOffered'), answered: answered,
+        answeredWithinT1: w, answeredT1toT2: m, answeredOverT2: o,
+        pctWithinT1: pct(w, answered), pctT1toT2: pct(m, answered), pctOverT2: pct(o, answered),
+        overSla: count(d.metrics, 'nOverSla')
+      };
+    }).sort(function (a, b) { return a.intervalStart < b.intervalStart ? -1 : 1; });
+    function sum(k) { return rows.reduce(function (s, r) { return s + r[k]; }, 0); }
+    var A = sum('answered');
+    return {
+      rows: rows,
+      totals: {
+        offered: sum('offered'), answered: A,
+        answeredWithinT1: sum('answeredWithinT1'), answeredT1toT2: sum('answeredT1toT2'), answeredOverT2: sum('answeredOverT2'),
+        pctWithinT1: pct(sum('answeredWithinT1'), A), pctT1toT2: pct(sum('answeredT1toT2'), A), pctOverT2: pct(sum('answeredOverT2'), A),
+        overSla: sum('overSla')
+      }
+    };
+  }
+  return { buildQuery: buildQuery, shape: shape, dayInterval: dayInterval, localMidnightUtc: localMidnightUtc };
+})();
+if (typeof module !== 'undefined') module.exports = SlaCore;
+</script>
+
+<script>
+(function () {
+  var STORE = 'slaBuckets.token';
+  function sGet() { try { return JSON.parse(sessionStorage.getItem(STORE) || 'null'); } catch (e) { return null; } }
+  function sSet(v) { try { sessionStorage.setItem(STORE, JSON.stringify(v)); } catch (e) {} }
+  function sDel() { try { sessionStorage.removeItem(STORE); } catch (e) {} }
+
+  // ---- OAuth return: token arrives in the hash, our URL parameters come back in "state" ----
+  var token = null, oauthError = null;
+  if (location.hash.indexOf('access_token=') >= 0 || location.hash.indexOf('error=') >= 0) {
+    var h = new URLSearchParams(location.hash.slice(1));
+    if (h.get('access_token')) {
+      token = h.get('access_token');
+      sSet({ t: token, exp: Date.now() + (parseInt(h.get('expires_in') || '0', 10) - 60) * 1000 });
+    } else {
+      oauthError = (h.get('error') || 'error') + (h.get('error_description') ? ': ' + h.get('error_description') : '');
+    }
+    var st = h.get('state') || '';
+    history.replaceState(null, '', location.pathname + (st.charAt(0) === '?' ? st : location.search));
+  } else {
+    var saved = sGet();
+    if (saved && saved.exp > Date.now()) token = saved.t;
+  }
+
+  var qs = new URLSearchParams(location.search);
+  var cfg = {
+    env: qs.get('env'), clientId: qs.get('clientId'), queueId: qs.get('queueId'),
+    queueName: qs.get('queueName') || '',
+    t1: parseInt(qs.get('t1') || '30', 10), t2: parseInt(qs.get('t2') || '60', 10),
+    gran: qs.get('gran') === 'PT30M' ? 'PT30M' : 'PT1H',
+    tz: qs.get('tz') || 'Europe/Athens', media: qs.get('media') || 'voice',
+    refresh: parseInt(qs.get('refresh') || '300', 10)
+  };
+  var out = document.getElementById('out');
+  var dateEl = document.getElementById('date');
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function show(html, cls) { out.innerHTML = '<div class="msg ' + (cls || '') + '">' + html + '</div>'; }
+
+  var missing = ['env', 'clientId', 'queueId'].filter(function (k) { return !cfg[k]; });
+  if (missing.length) { show('Λείπουν παράμετροι URL: ' + missing.join(', '), 'err'); return; }
+  if (!(cfg.t1 > 0 && cfg.t2 > cfg.t1)) { show('Το t2 πρέπει να είναι μεγαλύτερο από το t1.', 'err'); return; }
+  if (!/^[a-z0-9.-]+$/i.test(cfg.env)) { show('Μη έγκυρο env.', 'err'); return; }
+
+  dateEl.value = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.tz }).format(new Date());
+  document.getElementById('title').textContent = 'Answer time buckets' + (cfg.queueName ? ' · ' + cfg.queueName : '');
+  document.getElementById('meta').textContent = '≤' + cfg.t1 + 's / ' + (cfg.t1 + 1) + '–' + cfg.t2 + 's / >' + cfg.t2 +
+    's · ' + (cfg.gran === 'PT30M' ? '30 λεπτά' : 'ανά ώρα') + ' · ' + cfg.media;
+
+  // ---- login (Implicit Grant) ----
+  // redirect_uri is always the clean page URL (register exactly this in the OAuth client);
+  // the URL parameters travel in "state" and are restored on return.
+  function loginUrl() {
+    return 'https://login.' + cfg.env + '/oauth/authorize?response_type=token' +
+      '&client_id=' + encodeURIComponent(cfg.clientId) +
+      '&redirect_uri=' + encodeURIComponent(location.origin + location.pathname) +
+      '&state=' + encodeURIComponent(location.search);
+  }
+  if (oauthError) {
+    show('Login απέτυχε: ' + esc(oauthError) + '<br>Ελέγξτε ότι το Authorized redirect URI του OAuth client είναι ακριβώς: <b>' +
+      esc(location.origin + location.pathname) + '</b> — <a href="' + esc(loginUrl()) + '">Δοκιμή ξανά</a>', 'err');
+    return;
+  }
+  if (!token) { location.href = loginUrl(); return; }
+
+  // ---- data ----
+  var busy = false;
+  function load() {
+    if (busy) return; busy = true;
+    var body = SlaCore.buildQuery({ date: dateEl.value, tz: cfg.tz, gran: cfg.gran, queueId: cfg.queueId,
+                                    media: cfg.media, t1: cfg.t1, t2: cfg.t2 });
+    fetch('https://api.' + cfg.env + '/api/v2/analytics/conversations/aggregates/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      if (res.status === 401) { sDel(); location.href = loginUrl(); return null; }
+      return res.json().catch(function () { return {}; }).then(function (j) {
+        if (res.status === 403) throw new Error('403 — λείπει το permission Analytics > Conversation Aggregate > View ή πρόσβαση στο division της ουράς.');
+        if (res.status === 429) throw new Error('429 — rate limit. Αυξήστε το refresh.');
+        if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + (j.message || JSON.stringify(j)));
+        return j;
+      });
+    }).then(function (j) {
+      if (j) render(SlaCore.shape(j, cfg.tz));
+    }).catch(function (e) {
+      show('Σφάλμα: ' + esc(e.message), 'err');
+    }).then(function () { busy = false; });
+  }
+
+  function render(d) {
+    var t = d.totals, t1 = cfg.t1, t2 = cfg.t2;
+    var rows = d.rows.filter(function (r) { return r.answered > 0 || r.offered > 0; });
+    function kpi(v, l, sw) {
+      return '<div class="kpi"><div class="v">' + v + '</div><div class="l">' +
+        (sw ? '<span class="sw ' + sw + '"></span>' : '') + l + '</div></div>';
+    }
+    var html = '<div class="kpis">' +
+      kpi(t.offered, 'Offered') + kpi(t.answered, 'Answered') +
+      kpi(t.pctWithinT1 + '%', '≤ ' + t1 + 's (' + t.answeredWithinT1 + ')', 'ok') +
+      kpi(t.pctT1toT2 + '%', (t1 + 1) + '–' + t2 + 's (' + t.answeredT1toT2 + ')', 'warn') +
+      kpi(t.pctOverT2 + '%', '> ' + t2 + 's (' + t.answeredOverT2 + ')', 'bad') + '</div>';
+    if (!rows.length) { out.innerHTML = html + '<div class="msg">Δεν υπάρχουν κλήσεις για αυτή την ημέρα.</div>'; return; }
+    html += '<div class="scroll"><table><thead><tr><th>Interval</th><th>Offer</th><th>Answered</th>' +
+      '<th>≤' + t1 + 's</th><th>' + (t1 + 1) + '–' + t2 + 's</th><th>&gt;' + t2 + 's</th><th>Κατανομή</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      html += '<tr><td>' + esc(r.intervalLabel) + '</td><td>' + r.offered + '</td><td>' + r.answered + '</td>' +
+        '<td>' + r.pctWithinT1 + '% <span class="meta">(' + r.answeredWithinT1 + ')</span></td>' +
+        '<td>' + r.pctT1toT2 + '% <span class="meta">(' + r.answeredT1toT2 + ')</span></td>' +
+        '<td>' + r.pctOverT2 + '% <span class="meta">(' + r.answeredOverT2 + ')</span></td>' +
+        '<td class="bar"><div class="stack" title="' + r.pctWithinT1 + '% / ' + r.pctT1toT2 + '% / ' + r.pctOverT2 + '%">' +
+        '<span class="ok" style="width:' + r.pctWithinT1 + '%"></span>' +
+        '<span class="warn" style="width:' + r.pctT1toT2 + '%"></span>' +
+        '<span class="bad" style="width:' + r.pctOverT2 + '%"></span></div></td></tr>';
+    });
+    html += '</tbody></table></div><div class="meta" style="margin-top:6px">Ενημέρωση ' +
+      new Date().toLocaleTimeString('el-GR') +
+      ' · % επί των απαντημένων του interval · καταγραφή στη στιγμή απάντησης (όπως το Queue Performance view).</div>';
+    out.innerHTML = html;
+  }
+
+  document.getElementById('reload').addEventListener('click', load);
+  dateEl.addEventListener('change', load);
+  load();
+  if (cfg.refresh > 0) setInterval(load, Math.max(60, cfg.refresh) * 1000);
+})();
+</script>
+</body>
+</html>
