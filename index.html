@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Answer Time Buckets</title>
+<title>Genesys Cloud - Custom Answer KPI</title>
 <!--
-  Genesys Cloud dashboard "Web content" page — direct Analytics API, no data action.
+  Genesys Cloud dashboard "Web content" page — direct Analytics API.
   POST /api/v2/analytics/conversations/aggregates/query with views (rangeBound on tAnswered),
   using the signed-in user's token (OAuth Code Authorization + PKCE, no client secret).
 
@@ -15,7 +15,7 @@
     queueId   Queue ID to preselect (optional — otherwise pick from the list)
     queueIds  Comma-separated queue IDs for a group view (optional)
     queueName Label to show                                           (optional)
-    t1, t2    Thresholds in seconds, default 30 / 60                  (optional)
+    t1, t2    Thresholds in seconds, default 30 / 60 (also editable on the page; last choice kept per browser)
     gran      PT1H (default) or PT30M                                 (optional)
     tz        IANA time zone, default Europe/Athens                   (optional)
     media     voice (default), message, email, callback               (optional)
@@ -47,9 +47,40 @@
   th, td { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; font-size: 11px; }
   th:first-child, td:first-child { text-align: left; }
-  td.bar { width: 40%; min-width: 120px; }
-  .stack { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: var(--line); }
-  .stack span { display: block; height: 100%; }
+  td { padding-top: 7px; padding-bottom: 7px; }
+  td.bar { width: 40%; min-width: 160px; }
+  .stack { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--line);
+           box-shadow: inset 0 0 0 1px rgba(0,0,0,.04); }
+  .stack span { display: flex; align-items: center; justify-content: center; height: 100%; min-width: 0;
+                font-size: 11px; font-weight: 600; line-height: 1; overflow: hidden; white-space: nowrap; }
+  .stack span + span { box-shadow: inset 1px 0 0 rgba(255,255,255,.35); }
+  .stack .ok, .stack .bad { color: #fff; }
+  .stack .warn { color: #2a1d00; }
+  /* sortable headers */
+  th.sortable { padding: 0; }
+  th.sortable button { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 5px 6px;
+                       cursor: pointer; text-align: inherit; border-radius: 4px; }
+  th.sortable button:hover { color: var(--fg); background: var(--card); }
+  th.sortable button:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
+  th[aria-sort="ascending"] button, th[aria-sort="descending"] button { color: var(--fg); font-weight: 600; }
+  .arrow { display: inline-block; width: 1em; text-align: center; opacity: .35; }
+  th[aria-sort="ascending"] .arrow, th[aria-sort="descending"] .arrow { opacity: 1; }
+  /* date box */
+  .datebox { position: relative; display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px;
+             border: 1px solid var(--line); border-radius: 6px; background: var(--card); cursor: pointer; }
+  .datebox:focus-within { outline: 2px solid var(--fg); outline-offset: 1px; }
+  .datetext { font-variant-numeric: tabular-nums; min-width: 82px; }
+  .cal { width: 14px; height: 14px; color: var(--muted); }
+  .datebox input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; padding: 0;
+                   border: 0; cursor: pointer; }
+  .datebox input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: auto; height: auto;
+                   margin: 0; padding: 0; cursor: pointer; }
+  /* thresholds */
+  .thr { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
+  .thr input[type=number] { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+  select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--card); color: var(--fg); }
+  .err { color: var(--bad); }
   .ok { background: var(--ok); } .warn { background: var(--warn); } .bad { background: var(--bad); }
   .msg { padding: 16px; background: var(--card); border-radius: 8px; color: var(--muted); }
   .msg.err { color: var(--bad); }
@@ -87,15 +118,15 @@
 </head>
 <body>
 <header>
-  <h1 id="title">Answer time buckets</h1>
+  <h1 id="title">Custom Answer KPI</h1>
   <span class="meta" id="meta"></span>
 </header>
-<nav class="toolbar" aria-label="Ουρές">
-  <span class="qlabel">Ουρές</span>
+<nav class="toolbar" aria-label="Queues">
+  <span class="qlabel">Queues</span>
   <div class="qpick">
-    <button type="button" id="qbtn" aria-haspopup="true" aria-expanded="false" disabled>Φόρτωση ουρών…</button>
+    <button type="button" id="qbtn" aria-haspopup="true" aria-expanded="false" disabled>Loading Queues</button>
     <div id="qpanel" class="qpanel" hidden>
-      <input type="search" id="qsearch" placeholder="Αναζήτηση ουράς…" aria-label="Αναζήτηση ουράς" autocomplete="off">
+      <input type="search" id="qsearch" placeholder="Αναζήτηση ουράς…" aria-label="Αναζήτηση Queue" autocomplete="off">
       <div class="qactions">
         <button type="button" id="qall">Επιλογή ορατών</button>
         <button type="button" id="qnone">Καθαρισμός</button>
@@ -111,6 +142,22 @@
     </div>
   </div>
   <span class="meta" id="qerr"></span>
+  <span style="flex:1"></span>
+  <form class="thr" id="thrForm" autocomplete="off" aria-label="Όρια χρόνου απάντησης">
+    <span class="qlabel">Όρια (sec)</span>
+    <input type="number" id="t1" min="1" max="3599" step="1" inputmode="numeric" aria-label="Όριο 1 σε δευτερόλεπτα">
+    <span class="meta">/</span>
+    <input type="number" id="t2" min="2" max="3600" step="1" inputmode="numeric" aria-label="Όριο 2 σε δευτερόλεπτα">
+    <button type="submit" id="thrApply">Εφαρμογή</button>
+    <select id="thrPreset" aria-label="Έτοιμα όρια">
+      <option value="">Έτοιμα…</option>
+      <option value="20,40">≤20 / 21–40 / >40</option>
+      <option value="30,40">≤30 / 31–40 / >40</option>
+      <option value="30,60">≤30 / 31–60 / >60</option>
+      <option value="60,120">≤60 / 61–120 / >120</option>
+    </select>
+    <span class="meta err" id="thrErr" role="status"></span>
+  </form>
 </nav>
 <nav class="toolbar" aria-label="Περίοδος">
   <div class="seg" role="group" aria-label="Εύρος">
@@ -125,7 +172,13 @@
   </div>
   <button type="button" id="today">Σήμερα</button>
   <span style="flex:1"></span>
-  <input type="date" id="date" aria-label="Ημερομηνία">
+  <!-- dd/mm/yyyy display; the transparent native date input on top opens the browser's calendar
+       (works inside cross-origin iframes, unlike showPicker()) -->
+  <label class="datebox" title="Επιλογή ημερομηνίας">
+    <span id="dateText" class="datetext">--/--/----</span>
+    <svg class="cal" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="12" rx="2" fill="none" stroke="currentColor"/><path d="M1.5 6h13M5 1v3M11 1v3" stroke="currentColor"/></svg>
+    <input type="date" id="date" aria-label="Ημερομηνία">
+  </label>
   <button id="reload" type="button">Ανανέωση</button>
 </nav>
 <div id="out"><div class="msg">Φόρτωση…</div></div>
@@ -300,7 +353,32 @@ var SlaCore = (function () {
       }
     };
   }
+  // Sort rows by a column. Bucket columns sort by percentage, then by count; ties keep the natural order.
+  // key: 'label' | 'offered' | 'answered' | 'b1' | 'b2' | 'b3'; dir: 1 asc, -1 desc; labelOf(row) for the first column
+  var BUCKET = { b1: ['pctWithinT1', 'answeredWithinT1'], b2: ['pctT1toT2', 'answeredT1toT2'], b3: ['pctOverT2', 'answeredOverT2'] };
+  function sortRows(rows, key, dir, labelOf) {
+    var idx = rows.map(function (r, i) { return { r: r, i: i }; });
+    idx.sort(function (A, B) {
+      var a = A.r, b = B.r, c = 0;
+      if (key === 'label') c = String(labelOf(a)).localeCompare(String(labelOf(b)), 'el', { numeric: true, sensitivity: 'base' });
+      else if (BUCKET[key]) c = (a[BUCKET[key][0]] - b[BUCKET[key][0]]) || (a[BUCKET[key][1]] - b[BUCKET[key][1]]);
+      else c = (a[key] || 0) - (b[key] || 0);
+      return c * dir || A.i - B.i;
+    });
+    return idx.map(function (x) { return x.r; });
+  }
+  function fmtDMY(s) { var a = parts(s); return ('0' + a[2]).slice(-2) + '/' + ('0' + a[1]).slice(-2) + '/' + a[0]; }
+  // thresholds: integers, 1 ≤ t1 < t2 ≤ 3600
+  function validThresholds(t1, t2) {
+    t1 = Number(t1); t2 = Number(t2);
+    if (!Number.isInteger(t1) || !Number.isInteger(t2)) return 'Τα όρια πρέπει να είναι ακέραια δευτερόλεπτα.';
+    if (t1 < 1 || t2 > 3600) return 'Επιτρεπτό εύρος 1–3600 sec.';
+    if (t2 <= t1) return 'Το 2ο όριο πρέπει να είναι μεγαλύτερο από το 1ο.';
+    return '';
+  }
+
   return { buildQuery: buildQuery, shape: shape, shapeMulti: shapeMulti, chunk: chunk,
+           sortRows: sortRows, fmtDMY: fmtDMY, validThresholds: validThresholds,
            dayInterval: dayInterval, rangeInterval: rangeInterval,
            localMidnightUtc: localMidnightUtc, periodRange: periodRange, shiftAnchor: shiftAnchor,
            periodLabel: periodLabel, addDays: addDays };
@@ -376,31 +454,50 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
       if (!oauthError) setTimeout(function () { window.close(); }, 300);
       return;
     }
-    if (token) sSet(TOKEN_KEY, JSON.stringify({ t: token, exp: tokenExp }));
+    if (token) { sSet(TOKEN_KEY, JSON.stringify({ t: token, exp: tokenExp })); sDel('slaBuckets.frameTry'); }
   } else {
     try { var saved = JSON.parse(sGet(TOKEN_KEY) || 'null'); if (saved && saved.exp > Date.now()) { token = saved.t; tokenExp = saved.exp; } } catch (e) {}
   }
 
   // ---- 2. Page configuration (from the URL, restored after login) ----
   var qs = new URLSearchParams(location.search);
+  // Per-viewer preferences (thresholds, queues, period, sorting) kept in this browser, so a Client Application,
+  // which always reopens its configured URL, comes back to the viewer's last choices. URL parameters win.
+  var PREFS_KEY = 'slaBuckets.prefs.' + (qs.get('env') || '') + '.' + (qs.get('clientId') || '');
+  var prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; } catch (e) { prefs = {}; }
+  function savePrefs() {
+    try {
+      var names_ = {}; cfg.queueIds.forEach(function (id) { if (typeof names !== 'undefined' && names[id]) names_[id] = names[id]; });
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ t1: cfg.t1, t2: cfg.t2, queueIds: cfg.queueIds, names: names_,
+        period: (typeof view !== 'undefined' ? view.period : cfg.period), sort: (typeof sortState !== 'undefined' ? sortState : prefs.sort) }));
+    } catch (e) {}
+  }
+  function parseIds(s) {
+    return (s || '').split(',').map(function (x) { return x.trim(); })
+      .filter(function (x, i, arr) { return /^[0-9a-f-]{8,}$/i.test(x) && arr.indexOf(x) === i; });
+  }
+  var urlIds = parseIds(qs.get('queueIds') || qs.get('queueId'));
+  var hasUrlT = qs.has('t1') || qs.has('t2');
   var cfg = {
     env: qs.get('env'), clientId: qs.get('clientId'),
-    // queueIds=a,b,c (group) or queueId=a (single); both optional
-    queueIds: (qs.get('queueIds') || qs.get('queueId') || '').split(',').map(function (s) { return s.trim(); })
-      .filter(function (s, i, arr) { return /^[0-9a-f-]{8,}$/i.test(s) && arr.indexOf(s) === i; }),
+    // queueIds=a,b,c (group) or queueId=a (single); both optional; else last selection in this browser
+    queueIds: urlIds.length ? urlIds : (Array.isArray(prefs.queueIds) ? parseIds(prefs.queueIds.join(',')) : []),
     queueName: qs.get('queueName') || '',
-    t1: parseInt(qs.get('t1') || '30', 10), t2: parseInt(qs.get('t2') || '60', 10),
+    t1: parseInt(hasUrlT ? (qs.get('t1') || '30') : (prefs.t1 || 30), 10),
+    t2: parseInt(hasUrlT ? (qs.get('t2') || '60') : (prefs.t2 || 60), 10),
     gran: qs.get('gran') === 'PT30M' ? 'PT30M' : 'PT1H',
     tz: qs.get('tz') || 'Europe/Athens', media: qs.get('media') || 'voice',
     refresh: parseInt(qs.get('refresh') || '300', 10),
     popup: qs.get('popup') === '1',
-    period: ({ day: 1, week: 1, month: 1 })[qs.get('period')] ? qs.get('period') : 'day',
+    period: ({ day: 1, week: 1, month: 1 })[qs.get('period')] ? qs.get('period')
+          : ({ day: 1, week: 1, month: 1 })[prefs.period] ? prefs.period : 'day',
     date: /^\d{4}-\d{2}-\d{2}$/.test(qs.get('date') || '') ? qs.get('date') : null
   };
   var missing = ['env', 'clientId'].filter(function (k) { return !cfg[k]; });
   if (missing.length) { show('Λείπουν παράμετροι URL: ' + missing.join(', '), 'err'); return; }
   if (!/^[a-z0-9.-]+$/i.test(cfg.env)) { show('Μη έγκυρο env.', 'err'); return; }
-  if (!(cfg.t1 > 0 && cfg.t2 > cfg.t1)) { show('Το t2 πρέπει να είναι μεγαλύτερο από το t1.', 'err'); return; }
+  if (SlaCore.validThresholds(cfg.t1, cfg.t2)) { cfg.t1 = 30; cfg.t2 = 60; }   // bad URL/prefs values → defaults
 
   async function startLogin(searchForState) {
     var p = await pkcePair();
@@ -422,13 +519,34 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     return;
   }
 
-  // In an iframe → popup (needs a click, so popup blockers allow it). Top-level → normal redirect.
-  function loginInteractive() {
-    if (!inIframe) { startLogin(location.search); return; }
-    var sep = location.search ? '&' : '?';
-    var w = window.open(pageUrl + location.search + sep + 'popup=1', 'slaBucketsLogin', 'width=520,height=680');
-    if (!w) show('Ο browser μπλόκαρε το popup. Επιτρέψτε popups για αυτή τη σελίδα και πατήστε ξανά Σύνδεση.', 'err');
+  // Login strategies inside an iframe (Genesys Cloud Client Application / dashboard widget):
+  //  1. in-frame redirect (no popup). If the user already has a Genesys session the login page returns at once.
+  //     Needs sessionStorage (PKCE verifier) — tried automatically once per 10 minutes.
+  //  2. popup — needs the iframe sandbox to include allow-popups (Client Application: yes, if configured).
+  var FRAME_TRY_KEY = 'slaBuckets.frameTry';
+  function storageOK() {
+    try { sessionStorage.setItem('slaBuckets.t', '1'); var ok = sessionStorage.getItem('slaBuckets.t') === '1';
+          sessionStorage.removeItem('slaBuckets.t'); return ok; } catch (e) { return false; }
   }
+  function loginInFrame() { sSet(FRAME_TRY_KEY, String(Date.now())); startLogin(location.search); }
+  function loginPopup() {
+    var sep = location.search ? '&' : '?';
+    var w = null;
+    try { w = window.open(pageUrl + location.search + sep + 'popup=1', 'slaBucketsLogin', 'width=520,height=680'); } catch (e) {}
+    if (!w) show('Το πλαίσιο δεν επιτρέπει popup (iframe sandbox χωρίς <b>allow-popups</b>). ' +
+      'Δοκιμάστε «Σύνδεση σε αυτό το πλαίσιο», ή ρυθμίστε τη σελίδα ως <b>Client Application</b> με allow-popups στα sandbox options.<br>' +
+      loginButtons(), 'err'), bindLoginButtons();
+  }
+  function loginButtons() {
+    return '<button type="button" id="loginFrame">Σύνδεση σε αυτό το πλαίσιο</button> ' +
+           '<button type="button" id="loginPop">Σύνδεση σε νέο παράθυρο</button>';
+  }
+  function bindLoginButtons() {
+    var a = document.getElementById('loginFrame'), b = document.getElementById('loginPop');
+    if (a) a.addEventListener('click', loginInFrame);
+    if (b) b.addEventListener('click', loginPopup);
+  }
+  function loginInteractive() { if (!inIframe) startLogin(location.search); else loginInFrame(); }
   var started = false;
   window.addEventListener('message', function (ev) {
     if (ev.origin !== location.origin || !ev.data || ev.data.type !== MSG_TYPE) return;
@@ -440,8 +558,17 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
   function needLogin(reason) {
     token = null; sDel(TOKEN_KEY);
     if (!inIframe) { startLogin(location.search); return; }
-    show((reason ? esc(reason) + '<br>' : '') + '<button type="button" id="loginBtn">Σύνδεση στο Genesys Cloud</button>');
-    document.getElementById('loginBtn').addEventListener('click', loginInteractive);
+    if (!storageOK()) {
+      // e.g. dashboard Web content widget: storage blocked by the iframe sandbox → PKCE cannot work here
+      show('Αυτό το πλαίσιο δεν επιτρέπει αποθήκευση στον browser (iframe sandbox), οπότε η σύνδεση δεν μπορεί να ολοκληρωθεί εδώ.<br>' +
+        'Προσθέστε τη σελίδα ως <b>Client Application</b> (Admin → Integrations → Client Application) με sandbox options ' +
+        '<b>allow-scripts, allow-same-origin, allow-forms, allow-popups</b>.', 'err');
+      return;
+    }
+    var tried = parseInt(sGet(FRAME_TRY_KEY) || '0', 10);
+    if (Date.now() - tried > 10 * 60 * 1000) { loginInFrame(); return; }   // first attempt: silent in-frame login
+    show((reason ? esc(reason) + '<br>' : '') + 'Απαιτείται σύνδεση στο Genesys Cloud.<br>' + loginButtons());
+    bindLoginButtons();
   }
 
   // ===================== Data + rendering =====================
@@ -455,6 +582,7 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
   // ---------- queues: list, names, selection ----------
   var queues = [];                       // [{id, name}] visible to the user, sorted
   var names = {};                        // id → name (includes the queueName from the URL as a fallback)
+  if (prefs.names && typeof prefs.names === 'object') Object.keys(prefs.names).forEach(function (k) { names[k] = String(prefs.names[k]); });
   if (cfg.queueIds.length === 1 && cfg.queueName) names[cfg.queueIds[0]] = cfg.queueName;
   function qName(id) { return names[id] || id; }
 
@@ -559,7 +687,9 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     p.delete('queueId'); p.delete('queueName'); p.delete('queueIds');
     if (cfg.queueIds.length === 1) { p.set('queueId', cfg.queueIds[0]); if (names[cfg.queueIds[0]]) p.set('queueName', names[cfg.queueIds[0]]); }
     else if (cfg.queueIds.length > 1) p.set('queueIds', cfg.queueIds.join(','));
+    p.set('t1', String(cfg.t1)); p.set('t2', String(cfg.t2));
     history.replaceState(null, '', location.pathname + '?' + p.toString());
+    savePrefs();
   }
   function rangeNow() { return SlaCore.periodRange(view.period, view.anchor); }
   function containsToday() { var r = rangeNow(), t = todayStr(); return r.start <= t && t < r.end; }
@@ -567,6 +697,7 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     segBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-period') === view.period)); });
     document.getElementById('plabel').textContent = SlaCore.periodLabel(view.period, view.anchor);
     dateEl.value = view.anchor;
+    document.getElementById('dateText').textContent = SlaCore.fmtDMY(view.anchor);
     nextBtn.disabled = SlaCore.periodRange(view.period, SlaCore.shiftAnchor(view.period, view.anchor, 1)).start > todayStr();
     updateMeta();
   }
@@ -613,20 +744,36 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     });
   }
 
+  // ---------- rendering (sortable tables) ----------
+  var sortState = (prefs.sort && prefs.sort.rows && prefs.sort.queues) ? prefs.sort
+                : { rows: { key: 'label', dir: 1 }, queues: { key: 'answered', dir: -1 } };
+  var lastData = null;
+  function segment(cls, p) {
+    var label = p >= 9 ? Math.round(p) + '%' : '';          // text only where it fits
+    return '<span class="' + cls + '" style="width:' + p + '%">' + label + '</span>';
+  }
   function bucketCells(r) {
     return '<td>' + r.pctWithinT1 + '% <span class="meta">(' + r.answeredWithinT1 + ')</span></td>' +
       '<td>' + r.pctT1toT2 + '% <span class="meta">(' + r.answeredT1toT2 + ')</span></td>' +
       '<td>' + r.pctOverT2 + '% <span class="meta">(' + r.answeredOverT2 + ')</span></td>' +
       '<td class="bar"><div class="stack" title="' + r.pctWithinT1 + '% / ' + r.pctT1toT2 + '% / ' + r.pctOverT2 + '%">' +
-      '<span class="ok" style="width:' + r.pctWithinT1 + '%"></span>' +
-      '<span class="warn" style="width:' + r.pctT1toT2 + '%"></span>' +
-      '<span class="bad" style="width:' + r.pctOverT2 + '%"></span></div></td>';
+      segment('ok', r.pctWithinT1) + segment('warn', r.pctT1toT2) + segment('bad', r.pctOverT2) + '</div></td>';
   }
-  function head(first, t1, t2) {
-    return '<thead><tr><th>' + first + '</th><th>Offer</th><th>Answered</th><th>≤' + t1 + 's</th><th>' + (t1 + 1) + '–' + t2 +
-      's</th><th>&gt;' + t2 + 's</th><th>Κατανομή</th></tr></thead>';
+  function head(table, first, t1, t2) {
+    var st = sortState[table];
+    function th(key, label) {
+      var on = st.key === key, dir = on ? (st.dir > 0 ? 'ascending' : 'descending') : 'none';
+      var arrow = on ? (st.dir > 0 ? '▲' : '▼') : '↕';
+      return '<th class="sortable" aria-sort="' + dir + '"><button type="button" data-table="' + table + '" data-key="' + key +
+        '" title="Ταξινόμηση">' + label + ' <span class="arrow" aria-hidden="true">' + arrow + '</span></button></th>';
+    }
+    return '<thead><tr>' + th('label', first) + th('offered', 'Offer') + th('answered', 'Answered') +
+      th('b1', '≤' + t1 + 's') + th('b2', (t1 + 1) + '–' + t2 + 's') + th('b3', '&gt;' + t2 + 's') +
+      '<th>Κατανομή</th></tr></thead>';
   }
   function render(d) {
+    if (d) lastData = d; else d = lastData;
+    if (!d) return;
     var t = d.totals, t1 = cfg.t1, t2 = cfg.t2, group = cfg.queueIds.length > 1;
     var rows = d.rows.filter(function (r) { return r.answered > 0 || r.offered > 0; });
     function kpi(v, l, sw) {
@@ -651,8 +798,9 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
         (bsum === 0 ? ' — το API δεν επέστρεψε αποτελέσματα για τα views.' : '.') + '</div>';
     }
     if (group) html += '<h2>Σύνολο ομάδας ανά ' + (view.period === 'day' ? 'διάστημα' : 'ημέρα') + '</h2>';
-    html += '<div class="scroll"><table>' + head(view.period === 'day' ? 'Interval' : 'Ημέρα', t1, t2) + '<tbody>';
-    rows.forEach(function (r) {
+    var rs = SlaCore.sortRows(rows, sortState.rows.key, sortState.rows.dir, function (r) { return r.intervalStart; });
+    html += '<div class="scroll"><table>' + head('rows', view.period === 'day' ? 'Interval' : 'Ημέρα', t1, t2) + '<tbody>';
+    rs.forEach(function (r) {
       html += '<tr><td>' + esc(r.intervalLabel) + '</td><td>' + r.offered + '</td><td>' + r.answered + '</td>' + bucketCells(r) + '</tr>';
     });
     html += '</tbody></table></div>';
@@ -664,7 +812,8 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
         if (!byId[id]) list.push({ queueId: id, offered: 0, answered: 0, answeredWithinT1: 0, answeredT1toT2: 0,
           answeredOverT2: 0, pctWithinT1: 0, pctT1toT2: 0, pctOverT2: 0 });
       });
-      html += '<h2>Ανά ουρά (σύνολο περιόδου)</h2><div class="scroll"><table>' + head('Ουρά', t1, t2) + '<tbody>';
+      list = SlaCore.sortRows(list, sortState.queues.key, sortState.queues.dir, function (q) { return qName(q.queueId); });
+      html += '<h2>Ανά ουρά (σύνολο περιόδου)</h2><div class="scroll"><table>' + head('queues', 'Ουρά', t1, t2) + '<tbody>';
       list.forEach(function (q) {
         html += '<tr><td>' + esc(qName(q.queueId)) + '</td><td>' + q.offered + '</td><td>' + q.answered + '</td>' + bucketCells(q) + '</tr>';
       });
@@ -675,6 +824,41 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
       (group ? ' · μια κλήση που πέρασε από δύο επιλεγμένες ουρές μετράει σε κάθε ουρά' : '') + '.</div>';
     out.innerHTML = html;
   }
+  // header click: same column toggles direction; a new column starts descending (labels start ascending)
+  out.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('th.sortable button');
+    if (!btn) return;
+    var table = btn.getAttribute('data-table'), key = btn.getAttribute('data-key'), st = sortState[table];
+    if (st.key === key) st.dir = -st.dir; else { st.key = key; st.dir = key === 'label' ? 1 : -1; }
+    savePrefs(); render();
+    var again = out.querySelector('th.sortable button[data-table="' + table + '"][data-key="' + key + '"]');
+    if (again) again.focus();
+  });
+
+  // ---------- thresholds ----------
+  var t1El = document.getElementById('t1'), t2El = document.getElementById('t2');
+  var thrErr = document.getElementById('thrErr'), thrPreset = document.getElementById('thrPreset');
+  function showThresholds() {
+    t1El.value = cfg.t1; t2El.value = cfg.t2; thrErr.textContent = '';
+    thrPreset.value = Array.prototype.some.call(thrPreset.options, function (o) { return o.value === cfg.t1 + ',' + cfg.t2; })
+      ? cfg.t1 + ',' + cfg.t2 : '';
+  }
+  function applyThresholds(a, b) {
+    var msg = SlaCore.validThresholds(a, b);
+    if (msg) { thrErr.textContent = msg; return; }
+    a = Number(a); b = Number(b);
+    if (a === cfg.t1 && b === cfg.t2) { showThresholds(); return; }
+    cfg.t1 = a; cfg.t2 = b; showThresholds(); updateMeta(); syncUrl();
+    lastData = null; out.innerHTML = ''; load();               // buckets must be re-queried with the new ranges
+  }
+  document.getElementById('thrForm').addEventListener('submit', function (e) {
+    e.preventDefault(); applyThresholds(t1El.value, t2El.value);
+  });
+  thrPreset.addEventListener('change', function () {
+    if (!thrPreset.value) return;
+    var v = thrPreset.value.split(','); applyThresholds(v[0], v[1]);
+  });
+  showThresholds();
 
   function start() {
     started = true;
