@@ -20,6 +20,8 @@
     tz        IANA time zone, default Europe/Athens                   (optional)
     media     voice (default), message, email, callback               (optional)
     refresh   Auto refresh seconds, default 300, 0 = off, min 60      (optional)
+    period    day | week | month | custom (custom needs from=YYYY-MM-DD&to=YYYY-MM-DD, inclusive)
+    date      YYYY-MM-DD inside the period (day/week/month)
 
   Viewer permission needed: Analytics > Conversation Aggregate > View (+ access to the queue's division).
 -->
@@ -65,16 +67,38 @@
   th[aria-sort="ascending"] button, th[aria-sort="descending"] button { color: var(--fg); font-weight: 600; }
   .arrow { display: inline-block; width: 1em; text-align: center; opacity: .35; }
   th[aria-sort="ascending"] .arrow, th[aria-sort="descending"] .arrow { opacity: 1; }
-  /* date box */
-  .datebox { position: relative; display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px;
-             border: 1px solid var(--line); border-radius: 6px; background: var(--card); cursor: pointer; }
-  .datebox:focus-within { outline: 2px solid var(--fg); outline-offset: 1px; }
+  /* date box + range picker */
+  :root { --sel: #2a60c8; --sel-fg: #fff; --range: #dbe5f8; --range-fg: #1b3f86; }
+  @media (prefers-color-scheme: dark) { :root { --sel: #5b8cf0; --sel-fg: #0b1220; --range: #22324f; --range-fg: #cfdcff; } }
+  .rangepick { position: relative; }
+  .datebox { display: inline-flex; align-items: center; gap: 8px; }
   .datetext { font-variant-numeric: tabular-nums; min-width: 82px; }
   .cal { width: 14px; height: 14px; color: var(--muted); }
-  .datebox input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; padding: 0;
-                   border: 0; cursor: pointer; }
-  .datebox input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: auto; height: auto;
-                   margin: 0; padding: 0; cursor: pointer; }
+  .calpanel { position: absolute; z-index: 20; top: calc(100% + 4px); right: 0; background: var(--bg);
+              border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; box-shadow: 0 8px 28px rgba(0,0,0,.18);
+              width: max-content; max-width: calc(100vw - 32px); }
+  .calnav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .calnav button { min-width: 30px; font-size: 15px; line-height: 1; padding: 4px 8px; }
+  .calmonths { display: flex; flex-wrap: wrap; gap: 18px; }
+  .calmonth { width: 252px; }
+  .calmonth .mt { text-align: center; font-weight: 600; margin: 2px 0 6px; }
+  .calgrid { display: grid; grid-template-columns: repeat(7, 36px); row-gap: 2px; }
+  .calgrid .wd { text-align: center; font-size: 11px; color: var(--muted); padding: 2px 0 4px; }
+  .calgrid button { all: unset; box-sizing: border-box; height: 32px; text-align: center; line-height: 32px; cursor: pointer;
+                    font-variant-numeric: tabular-nums; position: relative; }
+  .calgrid button > i { font-style: normal; display: inline-block; width: 30px; height: 30px; line-height: 30px; border-radius: 50%; }
+  .calgrid button:hover > i { background: var(--card); outline: 1px solid var(--line); }
+  .calgrid button:focus-visible > i { outline: 2px solid var(--sel); }
+  .calgrid button.today > i { font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+  .calgrid button.in { background: var(--range); color: var(--range-fg); }
+  .calgrid button.start { background: linear-gradient(90deg, transparent 50%, var(--range) 50%); }
+  .calgrid button.end { background: linear-gradient(90deg, var(--range) 50%, transparent 50%); }
+  .calgrid button.start.end { background: none; }
+  .calgrid button.start > i, .calgrid button.end > i { background: var(--sel); color: var(--sel-fg); font-weight: 600; outline: 0; }
+  .calgrid button:disabled { cursor: default; opacity: .35; }
+  .calgrid button:disabled:hover > i { background: none; outline: 0; }
+  .calfoot { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .calsel { font-weight: 600; font-variant-numeric: tabular-nums; }
   /* thresholds */
   .thr { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
   .thr input[type=number] { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
@@ -172,13 +196,28 @@
   </div>
   <button type="button" id="today">Σήμερα</button>
   <span style="flex:1"></span>
-  <!-- dd/mm/yyyy display; the transparent native date input on top opens the browser's calendar
-       (works inside cross-origin iframes, unlike showPicker()) -->
-  <label class="datebox" title="Επιλογή ημερομηνίας">
-    <span id="dateText" class="datetext">--/--/----</span>
-    <svg class="cal" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="12" rx="2" fill="none" stroke="currentColor"/><path d="M1.5 6h13M5 1v3M11 1v3" stroke="currentColor"/></svg>
-    <input type="date" id="date" aria-label="Ημερομηνία">
-  </label>
+  <!-- date range picker (custom popover: native date inputs cannot select ranges) -->
+  <div class="rangepick">
+    <button type="button" id="dateBtn" class="datebox" aria-haspopup="dialog" aria-expanded="false" aria-controls="calPanel"
+            title="Επιλογή ημερομηνίας ή εύρους">
+      <span id="dateText" class="datetext">--/--/----</span>
+      <svg class="cal" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="12" rx="2" fill="none" stroke="currentColor"/><path d="M1.5 6h13M5 1v3M11 1v3" stroke="currentColor"/></svg>
+    </button>
+    <div id="calPanel" class="calpanel" role="dialog" aria-label="Επιλογή εύρους ημερομηνιών" hidden>
+      <div class="calnav">
+        <button type="button" id="calPrev" aria-label="Προηγούμενος μήνας">‹</button>
+        <span class="meta" id="calHint">Επιλέξτε ημέρα έναρξης</span>
+        <button type="button" id="calNext" aria-label="Επόμενος μήνας">›</button>
+      </div>
+      <div id="calMonths" class="calmonths"></div>
+      <div class="calfoot">
+        <span id="calSel" class="calsel"></span>
+        <span style="flex:1"></span>
+        <button type="button" id="calCancel">Άκυρο</button>
+        <button type="button" id="calApply" class="primary">Εφαρμογή</button>
+      </div>
+    </div>
+  </div>
   <button id="reload" type="button">Ανανέωση</button>
 </nav>
 <div id="out"><div class="msg">Φόρτωση…</div></div>
@@ -377,8 +416,38 @@ var SlaCore = (function () {
     return '';
   }
 
+  // ---- custom date ranges (inclusive from/to, plain YYYY-MM-DD) ----
+  function daysBetween(a, b) {                       // b − a in days
+    var x = parts(a), y = parts(b);
+    return Math.round((Date.UTC(y[0], y[1] - 1, y[2]) - Date.UTC(x[0], x[1] - 1, x[2])) / 86400000);
+  }
+  function rangeLabel(from, to) {                   // 01/10 – 05/10/2026, or with years when they differ
+    var a = parts(from), b = parts(to);
+    return (a[0] === b[0] ? dm(from) : fmtDMY(from)) + ' – ' + fmtDMY(to);
+  }
+  function shiftRange(from, to, dir) {               // previous/next block of the same length
+    var n = daysBetween(from, to) + 1;
+    return { from: addDays(from, n * dir), to: addDays(to, n * dir) };
+  }
+  // Month grid, Monday first: array of weeks, each 7 cells of 'YYYY-MM-DD' or null
+  function monthGrid(firstOfMonth) {
+    var a = parts(firstOfMonth), first = ymd(a[0], a[1], 1);
+    var lead = (new Date(Date.UTC(a[0], a[1] - 1, 1)).getUTCDay() + 6) % 7;
+    var days = daysBetween(first, ymd(a[0], a[1] + 1, 1));
+    var cells = [], i;
+    for (i = 0; i < lead; i++) cells.push(null);
+    for (i = 0; i < days; i++) cells.push(addDays(first, i));
+    while (cells.length % 7) cells.push(null);
+    var weeks = []; for (i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+    return weeks;
+  }
+  function monthTitle(firstOfMonth) { var a = parts(firstOfMonth); return EL_MONTHS[a[1] - 1] + ' ' + a[0]; }
+  function addMonths(firstOfMonth, n) { var a = parts(firstOfMonth); return ymd(a[0], a[1] + n, 1); }
+
   return { buildQuery: buildQuery, shape: shape, shapeMulti: shapeMulti, chunk: chunk,
            sortRows: sortRows, fmtDMY: fmtDMY, validThresholds: validThresholds,
+           daysBetween: daysBetween, rangeLabel: rangeLabel, shiftRange: shiftRange,
+           monthGrid: monthGrid, monthTitle: monthTitle, addMonths: addMonths,
            dayInterval: dayInterval, rangeInterval: rangeInterval,
            localMidnightUtc: localMidnightUtc, periodRange: periodRange, shiftAnchor: shiftAnchor,
            periodLabel: periodLabel, addDays: addDays };
@@ -470,7 +539,7 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     try {
       var names_ = {}; cfg.queueIds.forEach(function (id) { if (typeof names !== 'undefined' && names[id]) names_[id] = names[id]; });
       localStorage.setItem(PREFS_KEY, JSON.stringify({ t1: cfg.t1, t2: cfg.t2, queueIds: cfg.queueIds, names: names_,
-        period: (typeof view !== 'undefined' ? view.period : cfg.period), sort: (typeof sortState !== 'undefined' ? sortState : prefs.sort) }));
+        period: (function (p) { return p === 'custom' ? (prefs.period || 'day') : p; })(typeof view !== 'undefined' ? view.period : cfg.period), sort: (typeof sortState !== 'undefined' ? sortState : prefs.sort) }));
     } catch (e) {}
   }
   function parseIds(s) {
@@ -494,6 +563,11 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
           : ({ day: 1, week: 1, month: 1 })[prefs.period] ? prefs.period : 'day',
     date: /^\d{4}-\d{2}-\d{2}$/.test(qs.get('date') || '') ? qs.get('date') : null
   };
+  // custom range: period=custom&from=YYYY-MM-DD&to=YYYY-MM-DD (inclusive)
+  (function () {
+    var f = qs.get('from'), t = qs.get('to'), re = /^\d{4}-\d{2}-\d{2}$/;
+    if (qs.get('period') === 'custom' && re.test(f || '') && re.test(t || '') && f <= t) { cfg.period = 'custom'; cfg.from = f; cfg.to = t; }
+  })();
   var missing = ['env', 'clientId'].filter(function (k) { return !cfg[k]; });
   if (missing.length) { show('Λείπουν παράμετροι URL: ' + missing.join(', '), 'err'); return; }
   if (!/^[a-z0-9.-]+$/i.test(cfg.env)) { show('Μη έγκυρο env.', 'err'); return; }
@@ -572,12 +646,13 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
   }
 
   // ===================== Data + rendering =====================
-  var dateEl = document.getElementById('date');
   var prevBtn = document.getElementById('prev'), nextBtn = document.getElementById('next');
   var segBtns = Array.prototype.slice.call(document.querySelectorAll('.seg button'));
   function todayStr() { return new Intl.DateTimeFormat('en-CA', { timeZone: cfg.tz }).format(new Date()); }
-  var view = { period: cfg.period, anchor: cfg.date || todayStr() };
+  var view = { period: cfg.period, anchor: cfg.date || todayStr(), from: cfg.from || null, to: cfg.to || null };
   function granFor(period) { return period === 'day' ? cfg.gran : 'P1D'; }
+  // The page title is whatever the <h1> says in the HTML; the queue label is appended to it.
+  var BASE_TITLE = (document.getElementById('title').textContent || '').trim();
 
   // ---------- queues: list, names, selection ----------
   var queues = [];                       // [{id, name}] visible to the user, sorted
@@ -588,7 +663,7 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
 
   function updateTitle() {
     var n = cfg.queueIds.length, label = n === 0 ? '' : n === 1 ? qName(cfg.queueIds[0]) : 'Ομάδα · ' + n + ' ουρές';
-    document.getElementById('title').textContent = 'Answer time buckets' + (label ? ' · ' + label : '');
+    document.getElementById('title').textContent = BASE_TITLE + (label ? ' · ' + label : '');
     var btn = document.getElementById('qbtn');
     if (!btn.disabled || queues.length) {
       btn.textContent = n === 0 ? '— Επιλέξτε ουρές —' : n === 1 ? qName(cfg.queueIds[0])
@@ -683,7 +758,9 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
   // Keep queues/period/date in the address so a reload or re-login returns to the same view
   function syncUrl() {
     var p = new URLSearchParams(location.search);
-    p.set('period', view.period); p.set('date', view.anchor);
+    p.set('period', view.period);
+    if (view.period === 'custom') { p.delete('date'); p.set('from', view.from); p.set('to', view.to); }
+    else { p.set('date', view.anchor); p.delete('from'); p.delete('to'); }
     p.delete('queueId'); p.delete('queueName'); p.delete('queueIds');
     if (cfg.queueIds.length === 1) { p.set('queueId', cfg.queueIds[0]); if (names[cfg.queueIds[0]]) p.set('queueName', names[cfg.queueIds[0]]); }
     else if (cfg.queueIds.length > 1) p.set('queueIds', cfg.queueIds.join(','));
@@ -691,18 +768,36 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
     history.replaceState(null, '', location.pathname + '?' + p.toString());
     savePrefs();
   }
-  function rangeNow() { return SlaCore.periodRange(view.period, view.anchor); }
+  function rangeNow() {
+    if (view.period === 'custom') return { start: view.from, end: SlaCore.addDays(view.to, 1) };
+    return SlaCore.periodRange(view.period, view.anchor);
+  }
+  function inclusiveRange() { var r = rangeNow(); return { from: r.start, to: SlaCore.addDays(r.end, -1) }; }
   function containsToday() { var r = rangeNow(), t = todayStr(); return r.start <= t && t < r.end; }
   function updateNav() {
     segBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-period') === view.period)); });
-    document.getElementById('plabel').textContent = SlaCore.periodLabel(view.period, view.anchor);
-    dateEl.value = view.anchor;
-    document.getElementById('dateText').textContent = SlaCore.fmtDMY(view.anchor);
-    nextBtn.disabled = SlaCore.periodRange(view.period, SlaCore.shiftAnchor(view.period, view.anchor, 1)).start > todayStr();
+    var ir = inclusiveRange();
+    document.getElementById('plabel').textContent = view.period === 'custom'
+      ? SlaCore.rangeLabel(view.from, view.to) : SlaCore.periodLabel(view.period, view.anchor);
+    document.getElementById('dateText').textContent = view.period === 'day'
+      ? SlaCore.fmtDMY(view.anchor) : SlaCore.fmtDMY(ir.from) + ' – ' + SlaCore.fmtDMY(ir.to);
+    nextBtn.disabled = (view.period === 'custom' ? SlaCore.shiftRange(view.from, view.to, 1).from
+      : SlaCore.periodRange(view.period, SlaCore.shiftAnchor(view.period, view.anchor, 1)).start) > todayStr();
     updateMeta();
+  }
+  function goRange(from, to) {
+    if (from > to) { var x = from; from = to; to = x; }
+    if (from === to) { go(from, 'day'); return; }
+    view.period = 'custom'; view.from = from; view.to = to; view.anchor = from;
+    syncUrl(); updateNav(); load();
+  }
+  function step(dir) {
+    if (view.period === 'custom') { var s = SlaCore.shiftRange(view.from, view.to, dir); goRange(s.from, s.to); }
+    else go(SlaCore.shiftAnchor(view.period, view.anchor, dir));
   }
   function go(anchor, period) {
     if (period) view.period = period;
+    if (view.period === 'custom') view.period = 'day';
     view.anchor = anchor;
     if (view.period === 'month') view.anchor = SlaCore.periodRange('month', anchor).start;
     if (view.period === 'week') view.anchor = SlaCore.periodRange('week', anchor).start;
@@ -787,7 +882,7 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
       kpi(t.pctOverT2 + '%', '> ' + t2 + 's (' + t.answeredOverT2 + ')', 'bad') + '</div>';
     if (!rows.length) {
       out.innerHTML = html + '<div class="msg">Δεν υπάρχουν κλήσεις για ' +
-        ({ day: 'αυτή την ημέρα', week: 'αυτή την εβδομάδα', month: 'αυτόν τον μήνα' })[view.period] + '.</div>';
+        ({ day: 'αυτή την ημέρα', week: 'αυτή την εβδομάδα', month: 'αυτόν τον μήνα', custom: 'αυτό το διάστημα' })[view.period] + '.</div>';
       return;
     }
     // consistency check: the three buckets must add up to Answered
@@ -860,22 +955,134 @@ if (typeof module !== 'undefined') module.exports = SlaCore;
   });
   showThresholds();
 
+  // ---------- date range picker ----------
+  // 1st click = start, 2nd click = end (order does not matter); same day twice = single day.
+  // "Εφαρμογή" applies; a single day opens the hourly day view, a range the daily view.
+  var MAX_DAYS = 366;
+  var calBtn = document.getElementById('dateBtn'), calPanel = document.getElementById('calPanel');
+  var calMonths = document.getElementById('calMonths'), calHint = document.getElementById('calHint');
+  var calSelEl = document.getElementById('calSel'), calApply = document.getElementById('calApply');
+  var cal = { start: null, end: null, hover: null, left: null };
+  var EL_WD = ['Δε', 'Τρ', 'Τε', 'Πε', 'Πα', 'Σα', 'Κυ'];
+  function firstOf(d) { return d.slice(0, 8) + '01'; }
+  function calRange() {                       // [a, b] currently highlighted (incl. hover preview)
+    if (!cal.start) return null;
+    var e = cal.end || cal.hover || cal.start;
+    return cal.start <= e ? [cal.start, e] : [e, cal.start];
+  }
+  // buildCal(): (re)creates the two month grids — only when the visible months change.
+  // paintCal(): updates highlight classes/labels in place (clicks and hover never rebuild the DOM,
+  //             so a double-click lands on the same element twice).
+  function buildCal() {
+    var today = todayStr(), html = '';
+    [cal.left, SlaCore.addMonths(cal.left, 1)].forEach(function (m) {
+      html += '<div class="calmonth"><div class="mt">' + SlaCore.monthTitle(m) + '</div><div class="calgrid" role="grid">' +
+        EL_WD.map(function (w) { return '<span class="wd" role="columnheader">' + w + '</span>'; }).join('');
+      SlaCore.monthGrid(m).forEach(function (week) {
+        week.forEach(function (d) {
+          if (!d) { html += '<span></span>'; return; }
+          html += '<button type="button" role="gridcell" data-d="' + d + '"' + (d > today ? ' disabled' : '') +
+            ' aria-label="' + SlaCore.fmtDMY(d) + '"><i>' + Number(d.slice(8)) + '</i></button>';
+        });
+      });
+      html += '</div></div>';
+    });
+    calMonths.innerHTML = html;
+    document.getElementById('calNext').disabled = SlaCore.addMonths(cal.left, 1) >= firstOf(today);
+    paintCal();
+  }
+  function paintCal() {
+    var r = calRange(), today = todayStr();
+    Array.prototype.forEach.call(calMonths.querySelectorAll('button[data-d]'), function (btn) {
+      var d = btn.getAttribute('data-d');
+      var inR = !!(r && d >= r[0] && d <= r[1]), s = !!(r && d === r[0]), e = !!(r && d === r[1]);
+      btn.classList.toggle('in', inR); btn.classList.toggle('start', s); btn.classList.toggle('end', e);
+      btn.classList.toggle('today', d === today);
+      if (s || e) btn.setAttribute('aria-selected', 'true'); else btn.removeAttribute('aria-selected');
+    });
+    var n = r ? SlaCore.daysBetween(r[0], r[1]) + 1 : 0;
+    calSelEl.textContent = !r ? '' : n > 1 ? SlaCore.fmtDMY(r[0]) + ' – ' + SlaCore.fmtDMY(r[1]) + ' (' + n + ' ημέρες)' : SlaCore.fmtDMY(r[0]);
+    calHint.textContent = n > MAX_DAYS ? 'Μέγιστο εύρος ' + MAX_DAYS + ' ημέρες'
+      : cal.start && !cal.end ? 'Επιλέξτε ημέρα λήξης (ή Εφαρμογή για μία ημέρα)' : 'Επιλέξτε ημέρα έναρξης';
+    calHint.className = n > MAX_DAYS ? 'meta err' : 'meta';
+    calApply.disabled = !cal.start || n > MAX_DAYS;
+  }
+  function openCal() {
+    var ir = inclusiveRange();
+    cal.start = ir.from; cal.end = ir.to; cal.hover = null;
+    var right = firstOf(ir.to > todayStr() ? todayStr() : ir.to);
+    cal.left = SlaCore.addMonths(right, -1);
+    calPanel.hidden = false; calBtn.setAttribute('aria-expanded', 'true');
+    buildCal();
+    var f = ['button.end:not(:disabled)', 'button.today', 'button.start:not(:disabled)', 'button[data-d]:not(:disabled)']
+      .map(function (s) { return calMonths.querySelector(s); }).filter(Boolean)[0];
+    if (f) f.focus();
+  }
+  function closeCal() { calPanel.hidden = true; calBtn.setAttribute('aria-expanded', 'false'); }
+  function applyCal() {
+    if (calApply.disabled) return;
+    var r = [cal.start, cal.end || cal.start].sort();
+    closeCal();
+    if (r[0] === r[1]) go(r[0], 'day'); else goRange(r[0], r[1]);
+    calBtn.focus();
+  }
+  calBtn.addEventListener('click', function () { calPanel.hidden ? openCal() : closeCal(); });
+  calMonths.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('button[data-d]');
+    if (!b || b.disabled) return;
+    var d = b.getAttribute('data-d');
+    if (e.detail >= 2) { cal.start = cal.end = d; cal.hover = null; paintCal(); applyCal(); return; }  // double-click = that day
+    if (!cal.start || cal.end) { cal.start = d; cal.end = null; }      // begin a new selection
+    else cal.end = d;                                                  // finish it (any order)
+    cal.hover = null; paintCal();
+  });
+  calMonths.addEventListener('mouseover', function (e) {
+    if (!cal.start || cal.end) return;
+    var b = e.target.closest && e.target.closest('button[data-d]');
+    var d = b && !b.disabled ? b.getAttribute('data-d') : null;
+    if (d !== cal.hover) { cal.hover = d; paintCal(); }
+  });
+  document.getElementById('calPrev').addEventListener('click', function () { cal.left = SlaCore.addMonths(cal.left, -1); buildCal(); });
+  document.getElementById('calNext').addEventListener('click', function () { cal.left = SlaCore.addMonths(cal.left, 1); buildCal(); });
+  calApply.addEventListener('click', applyCal);
+  document.getElementById('calCancel').addEventListener('click', function () { closeCal(); calBtn.focus(); });
+  calPanel.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.stopPropagation(); closeCal(); calBtn.focus(); }
+    if (e.key === 'Enter' && e.target === calApply) return;
+    // arrow keys move between days
+    var b = e.target.closest && e.target.closest('button[data-d]');
+    var mv = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[e.key];
+    if (!b || !mv) return;
+    e.preventDefault();
+    var d = SlaCore.addDays(b.getAttribute('data-d'), mv);
+    if (d > todayStr()) return;
+    var moved = false;
+    if (d < cal.left) { cal.left = SlaCore.addMonths(cal.left, -1); moved = true; }
+    if (d >= SlaCore.addMonths(cal.left, 2)) { cal.left = SlaCore.addMonths(cal.left, 1); moved = true; }
+    if (cal.start && !cal.end) cal.hover = d;
+    if (moved) buildCal(); else paintCal();
+    var nb = calMonths.querySelector('button[data-d="' + d + '"]'); if (nb) nb.focus();
+  });
+  document.addEventListener('mousedown', function (e) {
+    if (!calPanel.hidden && !calPanel.contains(e.target) && !calBtn.contains(e.target)) closeCal();
+  });
+
   function start() {
     started = true;
     document.getElementById('reload').addEventListener('click', load);
-    dateEl.addEventListener('change', function () { if (dateEl.value) go(dateEl.value); });
-    prevBtn.addEventListener('click', function () { go(SlaCore.shiftAnchor(view.period, view.anchor, -1)); });
-    nextBtn.addEventListener('click', function () { if (!nextBtn.disabled) go(SlaCore.shiftAnchor(view.period, view.anchor, 1)); });
+    prevBtn.addEventListener('click', function () { step(-1); });
+    nextBtn.addEventListener('click', function () { if (!nextBtn.disabled) step(1); });
     document.getElementById('today').addEventListener('click', function () { go(todayStr()); });
     segBtns.forEach(function (b) {
       b.addEventListener('click', function () {
         var p = b.getAttribute('data-period');
         // week/month → day: land on today if it is inside the period being viewed, otherwise on its first day
-        go(p === 'day' && view.period !== 'day' && containsToday() ? todayStr() : view.anchor, p);
+        var from = view.period === 'custom' ? view.from : view.anchor;
+        go(p === 'day' && view.period !== 'day' && containsToday() ? todayStr() : from, p);
       });
     });
     updateTitle();
-    go(view.anchor);
+    if (view.period === 'custom') goRange(view.from, view.to); else go(view.anchor);
     loadQueues().then(function (list) {
       queues = list;
       queues.forEach(function (q) { names[q.id] = q.name; });
